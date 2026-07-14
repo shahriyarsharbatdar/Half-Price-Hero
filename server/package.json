@@ -1,0 +1,20 @@
+{
+  "name": "half-price-hero-server",
+  "version": "0.1.0",
+  "description": "API for Half Price Hero — Coles/Woolworths half-price specials matched to user recipes",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch --env-file=.env src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "google-translate-api-x": "^10.7.3"
+  }
+}

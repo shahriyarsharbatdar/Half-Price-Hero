@@ -1,0 +1,157 @@
+import express from "express";
+import cors from "cors";
+import { SPECIALS } from "./data/specials.js";
+import { analyseRecipe } from "./lib/matcher.js";
+import { estimateCalories } from "./lib/calories.js";
+import { translateIngredients } from "./lib/translate.js";
+import { libraryKey } from "./lib/library-key.js";
+import { tipsForRecipe } from "./services/claude.js";
+import { getState, saveState, findLibraryEntry, upsertLibraryEntry, suggestLibraryEntries, DAYS } from "./store.js";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const withAnalysis = (recipe) => ({
+  ...recipe,
+  analysis: analyseRecipe(recipe, SPECIALS),
+  kcalPerServe: estimateCalories(recipe),
+});
+
+/* ---- Health check (Render pings "/" to confirm the service is up) ---- */
+app.get("/", (_req, res) => {
+  res.json({ status: "ok", service: "half-price-hero-api" });
+});
+
+/* ---- Specials ---- */
+app.get("/api/specials", (_req, res) => {
+  res.json(SPECIALS);
+});
+
+/* ---- Recipes ---- */
+app.get("/api/recipes", (_req, res) => {
+  res.json(getState().recipes.map(withAnalysis));
+});
+
+app.post("/api/recipes", async (req, res) => {
+  const { name, ingredients } = req.body ?? {};
+  if (typeof name !== "string" || !name.trim()) {
+    return res.status(400).json({ error: "name is required" });
+  }
+  if (!Array.isArray(ingredients) || ingredients.length === 0 || !ingredients.every((i) => typeof i === "string" && i.trim())) {
+    return res.status(400).json({ error: "ingredients must be a non-empty array of strings" });
+  }
+  const trimmedIngredients = ingredients.map((i) => i.trim());
+  // Translate once at creation time (not on every match/analysis) so ingredients
+  // typed in any language still line up with the English-only specials catalogue.
+  const ingredientsEn = await translateIngredients(trimmedIngredients);
+
+  const state = getState();
+  const recipe = { id: state.nextId++, name: name.trim(), ingredients: trimmedIngredients, ingredientsEn };
+  state.recipes.unshift(recipe);
+  saveState();
+  res.status(201).json(withAnalysis(recipe));
+});
+
+app.delete("/api/recipes/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const state = getState();
+  const before = state.recipes.length;
+  state.recipes = state.recipes.filter((r) => r.id !== id);
+  if (state.recipes.length === before) return res.status(404).json({ error: "recipe not found" });
+  for (const day of DAYS) state.plan[day] = state.plan[day].filter((rid) => rid !== id);
+  saveState();
+  res.status(204).end();
+});
+
+/* ---- Weekly matcher ---- */
+app.get("/api/matches", (_req, res) => {
+  const matches = getState()
+    .recipes.map(withAnalysis)
+    .filter((r) => r.analysis.isMatch)
+    .sort((a, b) => b.analysis.count - a.analysis.count);
+  res.json(matches);
+});
+
+/* ---- Chef's tips (persistent library first, Claude API / rule-based fallback on a miss) ---- */
+app.get("/api/recipes/:id/tips", async (req, res) => {
+  const state = getState();
+  const recipe = state.recipes.find((r) => r.id === Number(req.params.id));
+  if (!recipe) return res.status(404).json({ error: "recipe not found" });
+
+  const key = libraryKey(recipe.name, recipe.ingredientsEn ?? recipe.ingredients);
+  const cached = findLibraryEntry(key);
+  if (cached) {
+    return res.json({ ...cached, cached: true });
+  }
+
+  const result = await tipsForRecipe(recipe);
+  upsertLibraryEntry({
+    key,
+    name: recipe.name,
+    ingredients: recipe.ingredients,
+    ingredientsEn: recipe.ingredientsEn ?? recipe.ingredients,
+    updatedAt: new Date().toISOString(),
+    ...result,
+  });
+  saveState();
+  res.json({ ...result, cached: false });
+});
+
+/* ---- Dish name autocomplete — suggests from the recipe library so users don't
+   retype a dish (and creating it reuses the cached tips, no AI call) ---- */
+app.get("/api/dishes/suggest", (req, res) => {
+  const q = typeof req.query.q === "string" ? req.query.q : "";
+  res.json(
+    suggestLibraryEntries(q).map((e) => ({
+      name: e.name,
+      ingredients: e.ingredients,
+      kcalPerServe: e.kcalPerServe,
+    }))
+  );
+});
+
+/* ---- Meal planner ---- */
+app.get("/api/plan", (_req, res) => {
+  const state = getState();
+  const byId = new Map(state.recipes.map((r) => [r.id, r]));
+  const plan = Object.fromEntries(
+    DAYS.map((day) => [
+      day,
+      state.plan[day]
+        .map((rid) => byId.get(rid))
+        .filter(Boolean)
+        .map((r) => ({ id: r.id, name: r.name, kcalPerServe: estimateCalories(r) })),
+    ])
+  );
+  const weekKcal = DAYS.reduce((sum, d) => sum + plan[d].reduce((s, m) => s + m.kcalPerServe, 0), 0);
+  res.json({ plan, weekKcal });
+});
+
+app.post("/api/plan", (req, res) => {
+  const { day, recipeId } = req.body ?? {};
+  const state = getState();
+  if (!DAYS.includes(day)) return res.status(400).json({ error: `day must be one of ${DAYS.join(", ")}` });
+  if (!state.recipes.some((r) => r.id === recipeId)) return res.status(404).json({ error: "recipe not found" });
+  state.plan[day].push(recipeId);
+  saveState();
+  res.status(201).json({ day, recipeId });
+});
+
+app.delete("/api/plan/:day/:index", (req, res) => {
+  const { day } = req.params;
+  const index = Number(req.params.index);
+  const state = getState();
+  if (!DAYS.includes(day) || !(index >= 0 && index < state.plan[day].length)) {
+    return res.status(404).json({ error: "plan entry not found" });
+  }
+  state.plan[day].splice(index, 1);
+  saveState();
+  res.status(204).end();
+});
+
+const PORT = process.env.PORT ?? 3001;
+app.listen(PORT, () => {
+  const tipsMode = process.env.ANTHROPIC_API_KEY ? "Claude API" : "rule-based fallback (no ANTHROPIC_API_KEY)";
+  console.log(`Half Price Hero API on http://localhost:${PORT} — chef's tips: ${tipsMode}`);
+});
