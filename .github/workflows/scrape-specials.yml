@@ -1,0 +1,31 @@
+name: Scrape half-price specials
+on:
+  schedule:
+    - cron: '0 20 * * *' # هر روز ساعت ۶ صبح به وقت ملبورن (20:00 UTC)
+  workflow_dispatch: # این خط باعث می‌شود دکمه Run workflow ظاهر شود
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: scraper/package.json
+      
+      - name: Install dependencies
+        run: |
+          cd scraper
+          npm install
+          npx playwright install --with-deps
+      
+      - name: Run Scraper
+        env:
+          SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          id
+          cd scraper
+          DISPLAY=:99 xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" node run.js
