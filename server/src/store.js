@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SPECIALS as SEED_SPECIALS } from "./data/specials.js";
 
 /**
  * Tiny JSON-file store for recipes, weekly plan, the recipe library (persisted
@@ -30,6 +31,11 @@ const SEED = {
   // ingredient text (lowercased) -> English translation, so repeat ingredient
   // strings across recipes never hit the translation service twice.
   translations: {},
+  // Half-price catalogue. Overwritten each morning by scraper/run.js via
+  // POST /api/admin/specials; starts out as the seed data above so a fresh
+  // deploy isn't empty before the first scrape.
+  specials: SEED_SPECIALS,
+  lastScrapedAt: null,
 };
 
 let state = null;
@@ -51,13 +57,25 @@ export function saveState() {
   writeFileSync(DB_PATH, JSON.stringify(state, null, 2));
 }
 
-/** Backfill fields for db.json files written before library/translations/ingredientsEn existed. */
+/** Backfill fields for db.json files written before library/translations/ingredientsEn/specials existed. */
 function migrate(s) {
   s.library ??= [];
   s.translations ??= {};
+  s.specials ??= SEED_SPECIALS;
+  s.lastScrapedAt ??= null;
   for (const recipe of s.recipes) {
     recipe.ingredientsEn ??= recipe.ingredients;
   }
+}
+
+export function getSpecials() {
+  return getState().specials;
+}
+
+export function setSpecials(specials) {
+  const s = getState();
+  s.specials = specials;
+  s.lastScrapedAt = new Date().toISOString();
 }
 
 export function getCachedTranslation(text) {

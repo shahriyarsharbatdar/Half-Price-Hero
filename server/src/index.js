@@ -1,12 +1,20 @@
 import express from "express";
 import cors from "cors";
-import { SPECIALS } from "./data/specials.js";
 import { analyseRecipe } from "./lib/matcher.js";
 import { estimateCalories } from "./lib/calories.js";
 import { translateIngredients } from "./lib/translate.js";
 import { libraryKey } from "./lib/library-key.js";
 import { tipsForRecipe } from "./services/claude.js";
-import { getState, saveState, findLibraryEntry, upsertLibraryEntry, suggestLibraryEntries, DAYS } from "./store.js";
+import {
+  getState,
+  saveState,
+  findLibraryEntry,
+  upsertLibraryEntry,
+  suggestLibraryEntries,
+  getSpecials,
+  setSpecials,
+  DAYS,
+} from "./store.js";
 
 const app = express();
 app.use(cors());
@@ -14,7 +22,7 @@ app.use(express.json());
 
 const withAnalysis = (recipe) => ({
   ...recipe,
-  analysis: analyseRecipe(recipe, SPECIALS),
+  analysis: analyseRecipe(recipe, getSpecials()),
   kcalPerServe: estimateCalories(recipe),
 });
 
@@ -25,7 +33,35 @@ app.get("/", (_req, res) => {
 
 /* ---- Specials ---- */
 app.get("/api/specials", (_req, res) => {
-  res.json(SPECIALS);
+  res.json(getSpecials());
+});
+
+/* ---- Admin: receives the daily scrape (see ../../scraper/) ---- */
+app.post("/api/admin/specials", (req, res) => {
+  const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  if (!process.env.SCRAPER_TOKEN || token !== process.env.SCRAPER_TOKEN) {
+    return res.status(401).json({ error: "invalid or missing token" });
+  }
+
+  const { specials } = req.body ?? {};
+  if (!Array.isArray(specials) || specials.length === 0) {
+    return res.status(400).json({ error: "specials must be a non-empty array" });
+  }
+  const valid = specials.every(
+    (s) =>
+      typeof s.id === "string" &&
+      typeof s.name === "string" &&
+      (s.store === "coles" || s.store === "woolies") &&
+      typeof s.was === "number" &&
+      typeof s.now === "number"
+  );
+  if (!valid) {
+    return res.status(400).json({ error: "each special needs id, name, store ('coles'|'woolies'), was, now" });
+  }
+
+  setSpecials(specials);
+  saveState();
+  res.json({ count: specials.length, lastScrapedAt: getState().lastScrapedAt });
 });
 
 /* ---- Recipes ---- */

@@ -1,6 +1,8 @@
 /**
- * Mock ½-price catalogue — Phase 2 replaces this with a real scraper/API
- * (Coles & Woolworths publish new catalogues Wednesdays).
+ * Seed ½-price catalogue — used only until the daily scraper (see
+ * ../../../scraper/) POSTs real data to /api/admin/specials for the first
+ * time. After that, store.js's persisted `specials` takes over; this file is
+ * just what a brand-new deploy shows before the first scrape runs.
  */
 export const SPECIALS = [
   { id: "sp-1",  name: "Leggo's Pasta Sauce 500g", category: "Pantry",        store: "coles",   was: 3.5, now: 1.75 },

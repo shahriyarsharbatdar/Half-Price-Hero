@@ -1,0 +1,38 @@
+name: Scrape half-price specials
+
+# Runs every morning and pushes fresh Coles + Woolworths half-price data to
+# the deployed backend. GitHub Actions cron is UTC-only and doesn't observe
+# daylight saving, so this lands around 6am AEST / 7am AEDT — good enough for
+# "every morning"; tighten it later if exact timing matters.
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scraper
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # installs the playwright package + downloads Chromium (postinstall
+      # hook) + the system libraries Chromium needs on a bare Ubuntu runner
+      - run: npm ci
+
+      # Woolworths blocks headless Chromium specifically (confirmed: it's
+      # served an Akamai "Access Denied" page in headless mode but not
+      # headed) — xvfb-run gives Playwright a real virtual display so it can
+      # launch non-headless on a display-less CI runner.
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - run: xvfb-run -a npm start
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
