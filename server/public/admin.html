@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Half Price Hero — Catalogue Import</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FBFAF6; --surface: #fff; --ink: #161A17; --ink-soft: #5C635B;
+    --line: #E7E3D8; --gold: #B8820A; --gold-bg: #FBF0D0;
+    --good: #0B7A38; --good-bg: #E4F3E8; --bad: #B3261E; --bad-bg: #FBEAE9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10140F; --surface: #191E17; --ink: #ECEFE7; --ink-soft: #A3AB9E;
+      --line: #2C332A; --gold: #F0C24B; --gold-bg: #33290E;
+      --good: #57C97F; --good-bg: #16301E; --bad: #FF6B60; --bad-bg: #3A1210;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center; padding: 40px 16px;
+  }
+  main { width: 100%; max-width: 480px; }
+  h1 { font-size: 20px; font-weight: 800; letter-spacing: -.3px; margin: 0 0 4px; }
+  p.sub { color: var(--ink-soft); font-size: 13px; margin: 0 0 24px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .3px; color: var(--ink-soft); margin-bottom: 6px; }
+  select, input[type=password], input[type=file] {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--ink); font-size: 14px; font-family: inherit;
+    margin-bottom: 14px;
+  }
+  button {
+    width: 100%; padding: 12px; border: none; border-radius: 10px;
+    background: var(--gold); color: #241a00; font-weight: 800; font-size: 14px;
+    cursor: pointer; font-family: inherit;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .status { margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13px; display: none; }
+  .status.good { display: block; background: var(--good-bg); color: var(--good); }
+  .status.bad { display: block; background: var(--bad-bg); color: var(--bad); }
+  .status.pending { display: block; background: var(--gold-bg); color: var(--gold); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .current-count { font-size: 26px; font-weight: 800; letter-spacing: -.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Catalogue Import</h1>
+  <p class="sub">Upload this week's Coles or Woolworths catalogue PDF — Claude reads it and pulls out every discounted item.</p>
+
+  <div class="card">
+    <label for="store">Store</label>
+    <select id="store">
+      <option value="coles">Coles</option>
+      <option value="woolies">Woolworths</option>
+    </select>
+
+    <label for="token">Admin token</label>
+    <input type="password" id="token" placeholder="SCRAPER_TOKEN" autocomplete="off" />
+
+    <label for="file">Catalogue PDF</label>
+    <input type="file" id="file" accept="application/pdf" />
+
+    <button id="submit">Upload &amp; extract</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card">
+    <label style="margin-bottom: 10px">Current specials</label>
+    <table id="current"></table>
+  </div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const tokenInput = $("token");
+  tokenInput.value = localStorage.getItem("hph_admin_token") || "";
+
+  async function loadCurrent() {
+    const specials = await fetch("/api/specials").then((r) => r.json());
+    const byStore = { coles: 0, woolies: 0 };
+    for (const s of specials) byStore[s.store] = (byStore[s.store] || 0) + 1;
+    $("current").innerHTML = `
+      <tr><td>Coles</td><td>${byStore.coles} items</td></tr>
+      <tr><td>Woolworths</td><td>${byStore.woolies} items</td></tr>
+    `;
+  }
+  loadCurrent();
+
+  $("submit").addEventListener("click", async () => {
+    const store = $("store").value;
+    const token = tokenInput.value.trim();
+    const file = $("file").files[0];
+    const status = $("status");
+
+    if (!token) return showStatus("bad", "Enter the admin token.");
+    if (!file) return showStatus("bad", "Choose a PDF file first.");
+
+    localStorage.setItem("hph_admin_token", token);
+
+    const submitBtn = $("submit");
+    submitBtn.disabled = true;
+    showStatus("pending", "Uploading and reading the catalogue — this can take a minute for a long PDF…");
+
+    const body = new FormData();
+    body.append("store", store);
+    body.append("catalogue", file);
+
+    try {
+      const res = await fetch("/api/admin/catalogue", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      showStatus("good", `Done — found ${data.count} discounted items for ${store === "coles" ? "Coles" : "Woolworths"}.`);
+      loadCurrent();
+    } catch (err) {
+      showStatus("bad", err.message);
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  function showStatus(kind, message) {
+    const el = $("status");
+    el.className = `status ${kind}`;
+    el.textContent = message;
+  }
+</script>
+</body>
+</html>

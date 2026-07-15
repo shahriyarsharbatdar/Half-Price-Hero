@@ -1,10 +1,14 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { analyseRecipe } from "./lib/matcher.js";
 import { estimateCalories } from "./lib/calories.js";
 import { translateIngredients } from "./lib/translate.js";
 import { libraryKey } from "./lib/library-key.js";
 import { tipsForRecipe } from "./services/claude.js";
+import { extractSpecialsFromCatalogue } from "./services/catalogue.js";
 import {
   getState,
   saveState,
@@ -13,12 +17,26 @@ import {
   suggestLibraryEntries,
   getSpecials,
   setSpecials,
+  mergeSpecialsForStore,
+  getSpecialsUpdatedAt,
   DAYS,
 } from "./store.js";
+
+const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB PDF cap
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(PUBLIC_DIR)); // serves public/admin.html at /admin.html
+
+function requireAdminToken(req, res, next) {
+  const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  if (!process.env.SCRAPER_TOKEN || token !== process.env.SCRAPER_TOKEN) {
+    return res.status(401).json({ error: "invalid or missing token" });
+  }
+  next();
+}
 
 const withAnalysis = (recipe) => ({
   ...recipe,
@@ -36,13 +54,8 @@ app.get("/api/specials", (_req, res) => {
   res.json(getSpecials());
 });
 
-/* ---- Admin: receives the daily scrape (see ../../scraper/) ---- */
-app.post("/api/admin/specials", (req, res) => {
-  const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-  if (!process.env.SCRAPER_TOKEN || token !== process.env.SCRAPER_TOKEN) {
-    return res.status(401).json({ error: "invalid or missing token" });
-  }
-
+/* ---- Admin: bulk specials replace — used by the (currently disabled) scraper, see ../../scraper/ ---- */
+app.post("/api/admin/specials", requireAdminToken, (req, res) => {
   const { specials } = req.body ?? {};
   if (!Array.isArray(specials) || specials.length === 0) {
     return res.status(400).json({ error: "specials must be a non-empty array" });
@@ -61,7 +74,34 @@ app.post("/api/admin/specials", (req, res) => {
 
   setSpecials(specials);
   saveState();
-  res.json({ count: specials.length, lastScrapedAt: getState().lastScrapedAt });
+  res.json({ count: specials.length, specialsUpdatedAt: getSpecialsUpdatedAt() });
+});
+
+/* ---- Admin: extract specials from an uploaded catalogue PDF for one store,
+   used by the /admin.html page (see services/catalogue.js) ---- */
+app.post("/api/admin/catalogue", requireAdminToken, upload.single("catalogue"), async (req, res) => {
+  const store = req.body?.store;
+  if (store !== "coles" && store !== "woolies") {
+    return res.status(400).json({ error: "store must be 'coles' or 'woolies'" });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: "no file uploaded (field name must be 'catalogue')" });
+  }
+  if (req.file.mimetype !== "application/pdf") {
+    return res.status(400).json({ error: "only application/pdf is supported" });
+  }
+
+  try {
+    const items = await extractSpecialsFromCatalogue(req.file.buffer);
+    if (items.length === 0) {
+      return res.status(422).json({ error: "no discounted items were found in this PDF" });
+    }
+    mergeSpecialsForStore(store, items);
+    saveState();
+    res.json({ store, count: items.length, specialsUpdatedAt: getSpecialsUpdatedAt() });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 /* ---- Recipes ---- */
@@ -184,6 +224,15 @@ app.delete("/api/plan/:day/:index", (req, res) => {
   state.plan[day].splice(index, 1);
   saveState();
   res.status(204).end();
+});
+
+// Multer errors (e.g. file too large) land here instead of Express's default
+// HTML error page — must be registered after all routes, with 4 params.
+app.use((err, _req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `upload error: ${err.message}` });
+  }
+  next(err);
 });
 
 const PORT = process.env.PORT ?? 3001;

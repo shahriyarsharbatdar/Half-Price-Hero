@@ -1,12 +1,17 @@
 name: Scrape half-price specials
 
-# Runs every morning and pushes fresh Coles + Woolworths half-price data to
-# the deployed backend. GitHub Actions cron is UTC-only and doesn't observe
-# daylight saving, so this lands around 6am AEST / 7am AEDT — good enough for
-# "every morning"; tighten it later if exact timing matters.
+# DISABLED (schedule trigger removed): Coles and Woolworths both actively
+# block automated scraping, even with the mitigations in scraper/ (stealth
+# fingerprint, AU locale, jittered pacing, retries) — reliable especially
+# from a datacenter IP like a GitHub Actions runner. Specials are now kept
+# up to date manually instead: download the weekly catalogue PDF from each
+# retailer's site and upload it at /admin, where Claude extracts the
+# half-price items (see server/src/services/catalogue.js).
+#
+# The scraper code and this workflow are left in place, disabled, in case
+# scraping becomes viable again later (e.g. via a residential proxy) — run
+# it manually from the Actions tab any time with workflow_dispatch.
 on:
-  schedule:
-    - cron: "0 20 * * *"
   workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
 
 jobs:

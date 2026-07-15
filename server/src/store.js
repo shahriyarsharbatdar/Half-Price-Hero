@@ -31,11 +31,12 @@ const SEED = {
   // ingredient text (lowercased) -> English translation, so repeat ingredient
   // strings across recipes never hit the translation service twice.
   translations: {},
-  // Half-price catalogue. Overwritten each morning by scraper/run.js via
-  // POST /api/admin/specials; starts out as the seed data above so a fresh
-  // deploy isn't empty before the first scrape.
+  // Half-price catalogue. Updated per-store by uploading a catalogue PDF at
+  // /admin (see services/catalogue.js) — Coles and Woolworths block
+  // automated scraping, so this is a manual weekly step. Starts out as the
+  // seed data above so a fresh deploy isn't empty before the first upload.
   specials: SEED_SPECIALS,
-  lastScrapedAt: null,
+  specialsUpdatedAt: { coles: null, woolies: null },
 };
 
 let state = null;
@@ -62,7 +63,7 @@ function migrate(s) {
   s.library ??= [];
   s.translations ??= {};
   s.specials ??= SEED_SPECIALS;
-  s.lastScrapedAt ??= null;
+  s.specialsUpdatedAt ??= { coles: null, woolies: null };
   for (const recipe of s.recipes) {
     recipe.ingredientsEn ??= recipe.ingredients;
   }
@@ -72,10 +73,24 @@ export function getSpecials() {
   return getState().specials;
 }
 
+export function getSpecialsUpdatedAt() {
+  return getState().specialsUpdatedAt;
+}
+
+/** Bulk replace (both stores at once) — used by the (currently disabled) scraper path. */
 export function setSpecials(specials) {
   const s = getState();
   s.specials = specials;
-  s.lastScrapedAt = new Date().toISOString();
+  const now = new Date().toISOString();
+  s.specialsUpdatedAt = { coles: now, woolies: now };
+}
+
+/** Replace only one store's items, leaving the other store's most recent data untouched. */
+export function mergeSpecialsForStore(store, items) {
+  const s = getState();
+  const withIds = items.map((item, i) => ({ id: `${store}-${i}`, store, ...item }));
+  s.specials = [...s.specials.filter((sp) => sp.store !== store), ...withIds];
+  s.specialsUpdatedAt = { ...s.specialsUpdatedAt, [store]: new Date().toISOString() };
 }
 
 export function getCachedTranslation(text) {

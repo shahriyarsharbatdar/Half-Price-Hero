@@ -9,22 +9,24 @@ and plans meals across the week. Ingredients can be typed in any language.
 ```
 half-price-hero/
 ├── server/            Node/Express API
-│   ├── src/index.js               routes (incl. POST /api/admin/specials, the scraper's ingestion endpoint)
+│   ├── src/index.js               routes (incl. the admin/catalogue + admin/specials ingestion endpoints)
 │   ├── src/store.js               JSON-file persistence (recipes, plan, recipe library, translation cache, specials)
-│   ├── src/data/specials.js       seed ½-price catalogue (shown until the first daily scrape lands)
+│   ├── src/data/specials.js       seed ½-price catalogue (shown until the first catalogue upload lands)
 │   ├── src/lib/matcher.js         ingredient ↔ special keyword matching (with light English stemming)
 │   ├── src/lib/calories.js        rough kcal-per-serve estimates
 │   ├── src/lib/translate.js       free, non-AI translation to English for matching (google-translate-api-x)
 │   ├── src/lib/library-key.js     identity key for the recipe library (name + ingredients)
 │   ├── src/lib/tips-rules.js      rule-based tips (offline fallback)
-│   └── src/services/claude.js     AI chef's tips + suggested method via the Claude API
+│   ├── src/services/claude.js     AI chef's tips + suggested method via the Claude API
+│   ├── src/services/catalogue.js  extracts specials from an uploaded catalogue PDF via Claude
+│   └── public/admin.html          catalogue-upload UI, served at /admin.html
 ├── client/            React + Vite + Tailwind UI, wired to the API
 │   └── src/HalfPriceHero.jsx      the app (fetches everything from /api/*)
-├── scraper/           Daily Coles + Woolworths half-price scraper (run by GitHub Actions, see below)
+├── scraper/           DISABLED — see "Disabled: daily scraper" below
 │   ├── coles.js                   Playwright, headless — reads embedded Next.js JSON
 │   ├── woolworths.js              Playwright, headed — Akamai blocks headless (see comments in the file)
 │   └── run.js                     orchestrates both, POSTs results to /api/admin/specials
-└── .github/workflows/scrape-specials.yml   cron: runs the scraper every morning
+└── .github/workflows/scrape-specials.yml   workflow_dispatch only — schedule removed, see below
 ```
 
 ## Run
@@ -62,7 +64,9 @@ of "✦ AI tips").
 | GET | `/api/plan` | Weekly plan with per-meal and weekly kcal |
 | POST | `/api/plan` | `{ day: "Mon".."Sun", recipeId }` |
 | DELETE | `/api/plan/:day/:index` | Remove a meal from a day |
-| POST | `/api/admin/specials` | Replaces the specials catalogue. `Authorization: Bearer <SCRAPER_TOKEN>` required. Called once a day by `scraper/run.js` via GitHub Actions — not meant for the client. |
+| POST | `/api/admin/catalogue` | Multipart upload: `store` ("coles"\|"woolies") + `catalogue` (PDF file). Extracts specials via Claude and merges into just that store's entries. `Authorization: Bearer <SCRAPER_TOKEN>` required. Used by `/admin.html`. |
+| POST | `/api/admin/specials` | Bulk-replaces the whole specials catalogue (both stores at once). `Authorization: Bearer <SCRAPER_TOKEN>` required. Used by the (disabled) `scraper/run.js` — not meant for the client. |
+| GET | `/admin.html` | Static upload page for the catalogue-PDF-import flow above (served directly by Express, no separate deploy). |
 
 ## Multi-language ingredients
 
@@ -105,12 +109,50 @@ deleting a recipe does **not** delete its library entry.
 - The library persists to `data/db.json`, so it survives server restarts —
   tips are only ever generated once per distinct dish.
 
-## Daily specials scraper
+## Updating specials: catalogue PDF import (current method)
+
+Coles and Woolworths both actively block automated scraping (see "Disabled:
+daily scraper" below for what was tried) — so specials are kept up to date by
+uploading the weekly catalogue PDF by hand instead:
+
+1. Download this week's catalogue PDF from the retailer's own site/app
+   (Coles: `coles.com.au/catalogues`; Woolworths: `woolworths.com.au/shop/catalogue`).
+2. Go to `https://<your-backend>/admin.html` (served directly by the Express
+   server — no separate deploy).
+3. Pick the store, paste the admin token (same `SCRAPER_TOKEN` value used
+   below), choose the PDF, and click **Upload & extract**.
+
+The server sends the PDF straight to Claude (`services/catalogue.js`) —
+Claude reads it natively, no OCR pipeline of our own — with a structured
+schema asking for every item with both a "was" and a discounted "now" price.
+The result replaces **only that store's** entries in `specials` (the other
+store's most recent upload is untouched), via `mergeSpecialsForStore()` in
+`store.js`. A catalogue can easily list 100+ discounted items; there's no
+artificial cap on how many get extracted.
+
+This reuses the same `specials` data model, `/api/specials` route, and
+`SCRAPER_TOKEN` auth the scraper below was built around — only *how* the data
+gets in changed, not what the rest of the app does with it.
+
+### Setup
+
+1. **Generate a shared secret**: `openssl rand -hex 32`
+2. **Render** (backend) → Environment → add `SCRAPER_TOKEN` = that value
+   (also required locally in `server/.env` if you want to use `/admin.html`
+   against your local dev server)
+3. That's it — no GitHub secrets needed for this path (those are only for
+   the disabled scraper below).
+
+## Disabled: daily scraper
 
 Every morning, `.github/workflows/scrape-specials.yml` (GitHub Actions cron)
-scrapes both retailers' half-price pages and POSTs the results to
+used to scrape both retailers' half-price pages and POST the results to
 `POST /api/admin/specials`, which overwrites the server's `specials` list —
-no redeploy needed.
+no redeploy needed. **The schedule trigger is now removed** (both sites
+block it too reliably from a datacenter IP — see below); the workflow and
+`scraper/` code are left in place, dormant, in case scraping becomes viable
+again later (e.g. with a paid residential proxy). It can still be run
+manually from the Actions tab via `workflow_dispatch`.
 
 **Why GitHub Actions and not a Render cron / an in-process `node-cron`:**
 Render's free tier spins the web service down when idle, so an in-process
@@ -159,16 +201,18 @@ unreliable after this, the remaining lever is a paid residential proxy
 that's a cost/complexity trade-off worth deciding deliberately, not
 defaulted into.
 
-### Setup
+### Setup (if re-enabling)
 
 1. **Generate a shared secret**: `openssl rand -hex 32`
 2. **Render** (backend) → Environment → add `SCRAPER_TOKEN` = that value
 3. **GitHub repo** → Settings → Secrets and variables → Actions → add:
    - `SCRAPER_TOKEN` = the same value as step 2
    - `BACKEND_URL` = your Render URL (e.g. `https://half-price-hero-backend.onrender.com`, no trailing slash)
-4. Test it without waiting for the schedule: **Actions tab → Scrape half-price
-   specials → Run workflow**. Check the run's logs for item counts, then
-   confirm with `curl https://<your-backend>/api/specials`.
+4. Put the `schedule:` trigger back in `.github/workflows/scrape-specials.yml`,
+   or just trigger it manually from the Actions tab (`workflow_dispatch`
+   already works without any of this — it's only the automatic daily run
+   that's off). Check the run's logs for item counts, then confirm with
+   `curl https://<your-backend>/api/specials`.
 
 ### Running it locally
 
