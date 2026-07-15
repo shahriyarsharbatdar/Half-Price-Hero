@@ -143,6 +143,22 @@ structure goes missing, they log and skip/retry rather than crashing, and
 against wiping the catalogue to empty on a bad day rather than silently
 publishing nothing).
 
+**Reliability note — datacenter IPs get treated worse than home ones.**
+GitHub Actions runners are on Azure's well-known IP ranges, and both sites'
+bot detection is visibly stricter toward that than toward a residential IP
+(confirmed: a run that scraped ~250/1200 Coles items and got fully blocked on
+Woolworths on a GitHub Actions runner worked far better locally from a home
+connection). `scraper/stealth.js` covers the free mitigations — a realistic
+browser fingerprint (patches the `navigator.webdriver` / plugins / languages
+tells headless Chromium leaves behind), `en-AU` locale/timezone, randomized
+(not fixed-interval) pacing between requests, and one retry with a fully
+fresh session if the first page load looks blocked. These meaningfully help
+but can't fully substitute for a non-datacenter source IP — if it's still
+unreliable after this, the remaining lever is a paid residential proxy
+(e.g. Bright Data, Smartproxy) so requests originate from a home-like IP;
+that's a cost/complexity trade-off worth deciding deliberately, not
+defaulted into.
+
 ### Setup
 
 1. **Generate a shared secret**: `openssl rand -hex 32`

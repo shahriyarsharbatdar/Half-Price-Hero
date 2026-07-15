@@ -16,6 +16,8 @@
  * writing), paginated 48/page via ?page=N.
  */
 
+import { AU_CONTEXT_OPTIONS, applyStealth, jitter } from "./stealth.js";
+
 const MAX_PAGES = 60; // safety bound — real total is ~26 pages at 48/page
 
 async function fetchPage(page, pageNumber) {
@@ -41,11 +43,8 @@ export async function scrapeColes() {
   const browser = await chromium.launch({ headless: true });
 
   try {
-    const context = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      viewport: { width: 1280, height: 800 },
-    });
+    const context = await browser.newContext(AU_CONTEXT_OPTIONS);
+    await applyStealth(context);
     const page = await context.newPage();
 
     const products = [];
@@ -60,7 +59,7 @@ export async function scrapeColes() {
         searchResults = await fetchPage(page, pageNumber);
       } catch (err) {
         console.error(`Coles page ${pageNumber} failed (${err.message}), retrying once...`);
-        await page.waitForTimeout(1500);
+        await jitter(2000, 4000);
         try {
           searchResults = await fetchPage(page, pageNumber);
         } catch (err2) {
@@ -92,7 +91,9 @@ export async function scrapeColes() {
       }
 
       pageNumber++;
-      await page.waitForTimeout(500); // be a polite scraper
+      // Longer pause every few pages + randomized gaps in between — a fixed
+      // interval is itself a bot tell, a human's browsing pace isn't metronomic.
+      await jitter(pageNumber % 5 === 0 ? 3000 : 700, pageNumber % 5 === 0 ? 6000 : 1800);
     }
 
     return products;
