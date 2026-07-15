@@ -111,7 +111,7 @@
 
     const submitBtn = $("submit");
     submitBtn.disabled = true;
-    showStatus("pending", "Uploading and reading the catalogue — this can take a minute for a long PDF…");
+    showStatus("pending", "Uploading and splitting the PDF…");
 
     const body = new FormData();
     body.append("store", store);
@@ -125,7 +125,10 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-      showStatus("good", `Done — found ${data.count} discounted items for ${store === "coles" ? "Coles" : "Woolworths"}.`);
+
+      const storeLabel = store === "coles" ? "Coles" : "Woolworths";
+      const count = await pollJob(data.jobId, token);
+      showStatus("good", `Done — found ${count} discounted items for ${storeLabel}.`);
       loadCurrent();
     } catch (err) {
       showStatus("bad", err.message);
@@ -133,6 +136,27 @@
       submitBtn.disabled = false;
     }
   });
+
+  // A real catalogue takes minutes to process (dozens of chunked Claude calls) —
+  // the upload endpoint returns a job id right away and this polls it.
+  async function pollJob(jobId, token) {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const res = await fetch(`/api/admin/catalogue/${jobId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const job = await res.json();
+      if (!res.ok) throw new Error(job.error || "lost track of this job");
+
+      if (job.status === "error") throw new Error(job.error);
+      if (job.status === "done") return job.count;
+
+      showStatus(
+        "pending",
+        job.total ? `Reading page batch ${job.completed}/${job.total}…` : "Splitting the PDF into batches…"
+      );
+    }
+  }
 
   function showStatus(kind, message) {
     const el = $("status");

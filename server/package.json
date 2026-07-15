@@ -16,6 +16,7 @@
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "google-translate-api-x": "^10.7.3",
-    "multer": "^2.2.0"
+    "multer": "^2.2.0",
+    "pdf-lib": "^1.17.1"
   }
 }

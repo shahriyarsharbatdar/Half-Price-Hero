@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { analyseRecipe } from "./lib/matcher.js";
@@ -23,7 +24,17 @@ import {
 } from "./store.js";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB PDF cap
+// Real catalogues run 25-30MB+ (confirmed against actual Coles/Woolworths exports) — well
+// past a typical "attachment" size, so the cap here is generous on purpose.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 60 * 1024 * 1024 } }); // 60MB PDF cap
+
+// Catalogue extraction runs for minutes on a real catalogue (many chunked Claude calls) —
+// too long to hold open a single request/response through a platform proxy (Render's
+// included) without risking a gateway timeout. So the upload endpoint kicks off
+// processing and returns immediately with a job id; the client polls for status.
+// In-memory only — fine for a low-frequency, single-operator admin tool; a job is lost
+// on server restart, which just means re-uploading.
+const catalogueJobs = new Map();
 
 const app = express();
 app.use(cors());
@@ -78,8 +89,9 @@ app.post("/api/admin/specials", requireAdminToken, (req, res) => {
 });
 
 /* ---- Admin: extract specials from an uploaded catalogue PDF for one store,
-   used by the /admin.html page (see services/catalogue.js) ---- */
-app.post("/api/admin/catalogue", requireAdminToken, upload.single("catalogue"), async (req, res) => {
+   used by the /admin.html page (see services/catalogue.js). Starts a background
+   job and returns its id immediately — see catalogueJobs comment above. ---- */
+app.post("/api/admin/catalogue", requireAdminToken, upload.single("catalogue"), (req, res) => {
   const store = req.body?.store;
   if (store !== "coles" && store !== "woolies") {
     return res.status(400).json({ error: "store must be 'coles' or 'woolies'" });
@@ -91,17 +103,33 @@ app.post("/api/admin/catalogue", requireAdminToken, upload.single("catalogue"), 
     return res.status(400).json({ error: "only application/pdf is supported" });
   }
 
-  try {
-    const items = await extractSpecialsFromCatalogue(req.file.buffer);
-    if (items.length === 0) {
-      return res.status(422).json({ error: "no discounted items were found in this PDF" });
-    }
-    mergeSpecialsForStore(store, items);
-    saveState();
-    res.json({ store, count: items.length, specialsUpdatedAt: getSpecialsUpdatedAt() });
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
+  const jobId = randomUUID();
+  catalogueJobs.set(jobId, { status: "processing", store, completed: 0, total: 0 });
+  res.status(202).json({ jobId });
+
+  extractSpecialsFromCatalogue(req.file.buffer, (completed, total) => {
+    const job = catalogueJobs.get(jobId);
+    if (job) Object.assign(job, { completed, total });
+  })
+    .then((items) => {
+      if (items.length === 0) {
+        catalogueJobs.set(jobId, { status: "error", store, error: "no discounted items were found in this PDF" });
+        return;
+      }
+      mergeSpecialsForStore(store, items);
+      saveState();
+      catalogueJobs.set(jobId, { status: "done", store, count: items.length, specialsUpdatedAt: getSpecialsUpdatedAt() });
+    })
+    .catch((err) => {
+      catalogueJobs.set(jobId, { status: "error", store, error: err.message });
+    });
+});
+
+/* ---- Admin: poll a catalogue extraction job started above ---- */
+app.get("/api/admin/catalogue/:jobId", requireAdminToken, (req, res) => {
+  const job = catalogueJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  res.json(job);
 });
 
 /* ---- Recipes ---- */
